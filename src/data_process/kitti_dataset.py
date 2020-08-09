@@ -50,7 +50,7 @@ class KittiDataset(Dataset):
         self.image_dir = os.path.join(self.dataset_dir, sub_folder, "image_2")
         self.calib_dir = os.path.join(self.dataset_dir, sub_folder, "calib")
         self.label_dir = os.path.join(self.dataset_dir, sub_folder, "label_2")
-        split_txt_path = os.path.join(self.dataset_dir, 'ImageSets', 'yolo3d', '{}.txt'.format(mode))
+        split_txt_path = os.path.join(self.dataset_dir, 'ImageSets', '{}.txt'.format(mode))
         self.sample_id_list = [int(x.strip()) for x in open(split_txt_path).readlines()]
 
         if num_samples is not None:
@@ -314,8 +314,7 @@ if __name__ == '__main__':
     configs.distributed = False  # For testing
     configs.pin_memory = False
     configs.num_samples = None
-    # configs.dataset_dir = os.path.join('../../', 'dataset', 'kitti')
-    configs.dataset_dir = os.path.join('/media/nmdung/SSD_4TB_Disk_2/Complex_YOLOv4_Pytorch', 'dataset', 'kitti')
+    configs.dataset_dir = os.path.join('../../', 'dataset', 'kitti')
     dataset = KittiDataset(configs.dataset_dir, mode='val', aug_transforms=None, num_samples=configs.num_samples)
 
     print('\n\nPress n to see the next sample >>> Press Esc to quit...')

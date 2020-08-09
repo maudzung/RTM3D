@@ -149,8 +149,7 @@ def parse_train_configs():
     ####################################################################
     ############## Dataset, logs, Checkpoints dir ######################
     ####################################################################
-    # configs.dataset_dir = os.path.join(configs.root_dir, 'dataset', 'kitti')
-    configs.dataset_dir = os.path.join('/media/nmdung/SSD_4TB_Disk_2/Complex_YOLOv4_Pytorch', 'dataset', 'kitti')
+    configs.dataset_dir = os.path.join(configs.root_dir, 'dataset', 'kitti')
     configs.checkpoints_dir = os.path.join(configs.root_dir, 'checkpoints', configs.saved_fn)
     configs.logs_dir = os.path.join(configs.root_dir, 'logs', configs.saved_fn)
 
