@@ -162,49 +162,70 @@ def compute_rot_loss(output, target_bin, target_res, mask):
 
 
 class Compute_Loss(nn.Module):
-    def __init__(self):
+    def __init__(self, device):
         super(Compute_Loss, self).__init__()
+        self.device = device
         self.focal_loss = FocalLoss()
         self.l1_loss = L1Loss()
-        self.vercoor_l1_loss = Vertexes_Coor_L1Loss()
+        self.vercoor_l1 = Vertexes_Coor_L1Loss()
         self.l2_loss = L2Loss()
         self.rot_loss = BinRotLoss()
-        self.weight_mc, self.weight_ver, self.weight_dim, self.weight_rot, self.weight_depth = 1., 1., 1., 0.5, 0.1
-        self.weight_vercoor, self.weight_cenoff, self.weight_veroff = 1., 0.5, 0.5
+        self.weight_hm_mc, self.weight_hm_ver, self.weight_dim, self.weight_rot, self.weight_depth = 1., 1., 1., 0.5, 0.1
+        self.weight_vercoor, self.weight_cenoff, self.weight_veroff, self.weight_wh = 1., 0.5, 0.5, 0.5
+        self.mean_dim = torch.tensor([1.53, 1.62, 3.89], device=device, dtype=torch.float).view(1, 1, 3)
+        self.std_dim = torch.tensor([0.13, 0.1, 0.41], device=device, dtype=torch.float).view(1, 1, 3)
 
-    def forward(self, outputs, targets):
-        l_mc = self.focal_loss(F.sigmoid(outputs['hm_mc']), targets['hm_mc'])
-        l_ver = self.focal_loss(F.sigmoid(outputs['hm_ver']), targets['hm_ver'])
-        # output, mask, ind, target
-        l_vercoor = self.vercoor_l1_loss(outputs['hm_vercoor'], targets['ver_coor_mask'], targets['indices_center'],
-                                         targets['ver_coor'])
-        l_cenoff = self.l1_loss(outputs['hm_cenoff'], targets['obj_mask'], targets['indices_center'],
-                                targets['cen_offset'])
-        l_veroff = self.l1_loss(outputs['hm_veroff'], targets['ver_offset_mask'], targets['indices_vertexes'],
-                                targets['ver_offset'])
-        l_dim = self.l2_loss(outputs['hm_dim'], targets['obj_mask'], targets['indices_center'], targets['dimension'])
-        # output, mask, ind, rotbin, rotres
-        l_rot = self.rot_loss(outputs['hm_rot'], targets['obj_mask'], targets['indices_center'], targets['rotbin'],
-                              targets['rotres'])
+    def normalize_dim(self, dim):
+        """
+        dim: (batch, max_objects, 3)
+        return: normalized dimension
+        """
+        return (dim - self.mean_dim) / self.std_dim
+
+    def forward(self, outputs, tg):
+        # tg: targets
+        outputs['hm_mc'] = F.sigmoid(outputs['hm_mc'])
+        outputs['hm_ver'] = F.sigmoid(outputs['hm_ver'])
+
+        # Normalize dimension
         # TODO: What happend if the norm_dim < 0, we can't apply the log operator
-        # l_depth = self.l2_loss(torch.log(outputs['hm_depth']), targets['obj_mask'], targets['indices_center'],
-        #                        torch.log(targets['depth']))
-        l_depth = self.l2_loss(outputs['hm_depth'], targets['obj_mask'], targets['indices_center'], targets['depth'])
+        # tg['dim'] = self.normalize_dim(tg['dim'])
+        # tg['dim'] = F.log(tg['dim'])  # take the log of the normalized dimension
 
-        total_loss = l_mc * self.weight_mc + l_ver * self.weight_ver + l_vercoor * self.weight_vercoor + \
+        # Follow depth loss in CenterNet
+        outputs['depth'] = 1. / (F.sigmoid(outputs['depth']) + 1e-9) - 1.
+
+        l_hm_mc = self.focal_loss(outputs['hm_mc'], tg['hm_mc'])
+        l_hm_ver = self.focal_loss(outputs['hm_ver'], tg['hm_ver'])
+        # output, mask, ind, target
+        l_vercoor = self.vercoor_l1(outputs['vercoor'], tg['ver_coor_mask'], tg['indices_center'], tg['ver_coor'])
+        l_cenoff = self.l1_loss(outputs['cenoff'], tg['obj_mask'], tg['indices_center'], tg['cen_offset'])
+        l_veroff = self.l1_loss(outputs['veroff'], tg['ver_offset_mask'], tg['indices_vertexes'], tg['ver_offset'])
+        # TODO: What happend if the norm_dim < 0, we can't apply the log operator
+        # Apply dimension loss (l1_loss) in the CenterNet instead of the l2_loss in the paper
+        l_dim = self.l1_loss(outputs['dim'], tg['obj_mask'], tg['indices_center'], tg['dim'])
+        # output, mask, ind, rotbin, rotres
+        l_rot = self.rot_loss(outputs['rot'], tg['obj_mask'], tg['indices_center'], tg['rotbin'], tg['rotres'])
+        # Apply depth loss (l1_loss) in the CenterNet instead of the l2_loss in the paper
+        # l_depth = self.l2_loss(torch.log(outputs['depth']), tg['obj_mask'], tg['indices_center'], torch.log(tg['depth']))
+        l_depth = self.l1_loss(outputs['depth'], tg['obj_mask'], tg['indices_center'], tg['depth'])
+        l_boxwh = self.l1_loss(outputs['wh'], tg['obj_mask'], tg['indices_center'], tg['wh'])
+
+        total_loss = l_hm_mc * self.weight_hm_mc + l_hm_ver * self.weight_hm_ver + l_vercoor * self.weight_vercoor + \
                      l_cenoff * self.weight_cenoff + l_veroff * self.weight_veroff + l_dim * self.weight_dim + \
-                     l_rot * self.weight_rot + l_depth * self.weight_depth
+                     l_rot * self.weight_rot + l_depth * self.weight_depth + l_boxwh * self.weight_wh
 
         loss_stats = {
             'total_loss': to_cpu(total_loss).item(),
-            'hm_mc_loss': to_cpu(l_mc).item(),
-            'hm_ver_loss': to_cpu(l_ver).item(),
+            'hm_mc_loss': to_cpu(l_hm_mc).item(),
+            'hm_ver_loss': to_cpu(l_hm_ver).item(),
             'ver_coor_loss': to_cpu(l_vercoor).item(),
             'cen_offset_loss': to_cpu(l_cenoff).item(),
             'ver_offset_loss': to_cpu(l_veroff).item(),
             'dim_loss': to_cpu(l_dim).item(),
             'rot_loss': to_cpu(l_rot).item(),
-            'depth_loss': to_cpu(l_depth).item()
+            'depth_loss': to_cpu(l_depth).item(),
+            'wh_loss': to_cpu(l_boxwh).item()
         }
 
         return total_loss, loss_stats

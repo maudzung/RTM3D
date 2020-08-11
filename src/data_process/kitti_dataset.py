@@ -11,34 +11,38 @@
 
 import sys
 import os
-import random
+import math
 
 import numpy as np
 from torch.utils.data import Dataset
-import torch
-import torch.nn.functional as F
 import cv2
 
 sys.path.append('../')
 
-from data_process.kitti_data_utils import gen_2d_gaussian_hm, compute_box_3d, draw_box_3d, draw_box_3d_v2, \
-    project_to_image, Calibration
+from data_process.kitti_data_utils import gen_hm_dynamic_sigma, gen_hm_radius, compute_radius, compute_box_3d, \
+    draw_box_3d, draw_box_3d_v2, project_to_image, Calibration
 import config.kitti_config as cnf
 
 
 class KittiDataset(Dataset):
-    def __init__(self, dataset_dir, input_size=(384, 1280), hm_size=(96, 320), mode='train', aug_transforms=None,
-                 hflip_prob=0., num_samples=None):
-        self.dataset_dir = dataset_dir
-        self.input_size = input_size
-        self.hm_size = hm_size
-        self.down_ratio = 4
+    def __init__(self, configs, mode='train', aug_transforms=None, hflip_prob=0., use_left_cam_prob=1.,
+                 num_samples=None):
+        self.dataset_dir = configs.dataset_dir
+        self.input_size = configs.input_size
+        self.hm_size = configs.hm_size
+        self.down_ratio = configs.down_ratio
+
+        self.num_classes = configs.num_classes
+        self.num_vertexes = configs.num_vertexes
+        self.max_objects = configs.max_objects
+
         self.hflip_prob = hflip_prob
+        self.hflip_indices = [[0, 1], [2, 3], [4, 5], [6, 7]]
+        self.dynamic_sigma = configs.dynamic_sigma
+        self.use_left_cam_prob = use_left_cam_prob
 
         self.mean_rgb = np.array([0.485, 0.456, 0.406], np.float32).reshape(1, 1, 3)
         self.std_rgb = np.array([0.229, 0.224, 0.225], np.float32).reshape(1, 1, 3)
-        self.mean_dim = np.array([1.53, 1.62, 3.89], np.float32)
-        self.std_dim = np.array([0.13, 0.1, 0.41], np.float32)
 
         assert mode in ['train', 'val', 'test'], 'Invalid mode: {}'.format(mode)
         self.mode = mode
@@ -47,7 +51,8 @@ class KittiDataset(Dataset):
 
         self.aug_transforms = aug_transforms
 
-        self.image_dir = os.path.join(self.dataset_dir, sub_folder, "image_2")
+        self.image_dir_left = os.path.join(self.dataset_dir, sub_folder, "image_2")
+        self.image_dir_right = os.path.join(self.dataset_dir, sub_folder, "image_3")
         self.calib_dir = os.path.join(self.dataset_dir, sub_folder, "calib")
         self.label_dir = os.path.join(self.dataset_dir, sub_folder, "label_2")
         split_txt_path = os.path.join(self.dataset_dir, 'ImageSets', '{}.txt'.format(mode))
@@ -69,21 +74,42 @@ class KittiDataset(Dataset):
     def load_img_only(self, index):
         """Load only image for the testing phase"""
 
+        use_left_cam = False
+        if np.random.random() < self.use_left_cam_prob:
+            use_left_cam = True
         sample_id = int(self.sample_id_list[index])
-        img_path = os.path.join(self.image_dir, '{:06d}.png'.format(sample_id))
-        img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+        img_path, img = self.get_image(sample_id, use_left_cam)
+        img, pad_size = self.padding_img(img, input_size=self.input_size)
+
+        hflipped = False
+        if np.random.random() < self.hflip_prob:
+            hflipped = True
+            img = img[:, ::-1, :]
         img = self.normalize_img(img)
 
-        return img_path, img.transpose(2, 0, 1)
+        metadata = {
+            'use_left_cam': use_left_cam,
+            'hflipped': hflipped
+        }
+
+        return img_path, img.transpose(2, 0, 1), metadata
 
     def load_img_with_targets(self, index):
         """Load images and targets for the training and validation phase"""
 
-        hflipped = False
+        use_left_cam = False
+        if np.random.random() < self.use_left_cam_prob:
+            use_left_cam = True
         sample_id = int(self.sample_id_list[index])
-        img_path = os.path.join(self.image_dir, '{:06d}.png'.format(sample_id))
-        img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+        img_path, img = self.get_image(sample_id, use_left_cam)
+
+        # Apply the augmentation for the raw image
+        if self.aug_transforms:
+            img = self.aug_transforms(image=img)['image']
+
         img, pad_size = self.padding_img(img, input_size=self.input_size)
+
+        hflipped = False
         if np.random.random() < self.hflip_prob:
             hflipped = True
             img = img[:, ::-1, :]
@@ -91,9 +117,13 @@ class KittiDataset(Dataset):
 
         calib = self.get_calib(sample_id)
         labels = self.get_label(sample_id)
-        targets = self.build_targets(labels, calib, pad_size, hflipped)
+        targets = self.build_targets(labels, calib, pad_size, hflipped, use_left_cam)
+        metadata = {
+            'use_left_cam': use_left_cam,
+            'hflipped': hflipped
+        }
 
-        return img_path, img.transpose(2, 0, 1), targets
+        return img_path, img.transpose(2, 0, 1), targets, metadata
 
     def padding_img(self, img, input_size):
         h, w, c = img.shape
@@ -105,10 +135,15 @@ class KittiDataset(Dataset):
 
         return ret_img, pad_size
 
-    def get_image(self, idx):
-        img_file = os.path.join(self.image_dir, '{:06d}.png'.format(idx))
-        # assert os.path.isfile(img_file)
-        return cv2.imread(img_file)  # (H, W, C) -> (H, W, 3) OpenCV reads in BGR mode
+    def get_image(self, idx, use_left_cam):
+        if use_left_cam:
+            img_path = os.path.join(self.image_dir_left, '{:06d}.png'.format(idx))
+        else:
+            img_path = os.path.join(self.image_dir_right, '{:06d}.png'.format(idx))
+
+        img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+
+        return img_path, img
 
     def get_calib(self, idx):
         calib_file = os.path.join(self.calib_dir, '{:06d}.txt'.format(idx))
@@ -144,103 +179,121 @@ class KittiDataset(Dataset):
     def normalize_img(self, img):
         return (img / 255. - self.mean_rgb) / self.std_rgb
 
-    def normalize_dim(self, dim):
-        return (dim - self.mean_dim) / self.std_dim
+    def build_targets(self, labels, calib, pad_size, hflipped, use_left_cam):
 
-    def build_targets(self, labels, calib, pad_size, hflipped):
-        num_classes = 3
-        num_vertexes = 8
-        max_objects = 50
-        num_objects = min(len(labels), max_objects)
+        num_objects = min(len(labels), self.max_objects)
         hm_h, hm_w = self.hm_size
-        input_h, input_w = self.input_size
 
-        # Settings for computing dynamic sigma
-        max_sigma = 19
-        min_sigma = 3
-        Amax = 129682
-        Amin = 13
+        hm_main_center = np.zeros((self.num_classes, hm_h, hm_w), dtype=np.float32)
+        hm_ver = np.zeros((self.num_vertexes, hm_h, hm_w), dtype=np.float32)
 
-        hm_main_center = np.zeros((num_classes, hm_h, hm_w), dtype=np.float32)
-        hm_ver = np.zeros((num_vertexes, hm_h, hm_w), dtype=np.float32)
+        cen_offset = np.zeros((self.max_objects, 2), dtype=np.float32)
+        indices_center = np.zeros((self.max_objects), dtype=np.int64)
+        obj_mask = np.zeros((self.max_objects), dtype=np.uint8)
 
-        cen_offset = np.zeros((max_objects, 2), dtype=np.float32)
-        indices_center = np.zeros((max_objects), dtype=np.int64)
-        obj_mask = np.zeros((max_objects), dtype=np.uint8)
+        ver_coor = np.zeros((self.max_objects, self.num_vertexes * 2), dtype=np.float32)
+        ver_coor_mask = np.zeros((self.max_objects, self.num_vertexes * 2), dtype=np.uint8)
+        ver_offset = np.zeros((self.max_objects * self.num_vertexes, 2), dtype=np.float32)
+        ver_offset_mask = np.zeros((self.max_objects * self.num_vertexes), dtype=np.uint8)
+        indices_vertexes = np.zeros((self.max_objects * self.num_vertexes), dtype=np.int64)
 
-        ver_coor = np.zeros((max_objects, num_vertexes * 2), dtype=np.float32)
-        ver_coor_mask = np.zeros((max_objects, num_vertexes * 2), dtype=np.uint8)
-        ver_offset = np.zeros((max_objects * num_vertexes, 2), dtype=np.float32)
-        ver_offset_mask = np.zeros((max_objects * num_vertexes), dtype=np.uint8)
-        indices_vertexes = np.zeros((max_objects * num_vertexes), dtype=np.int64)
+        dimension = np.zeros((self.max_objects, 3), dtype=np.float32)
 
-        dimension = np.zeros((max_objects, 3), dtype=np.float32)
+        rotbin = np.zeros((self.max_objects, 2), dtype=np.int64)
+        rotres = np.zeros((self.max_objects, 2), dtype=np.float32)
 
-        rotbin = np.zeros((max_objects, 2), dtype=np.int64)
-        rotres = np.zeros((max_objects, 2), dtype=np.float32)
-
-        depth = np.zeros((max_objects, 1), dtype=np.float32)
+        depth = np.zeros((self.max_objects, 1), dtype=np.float32)
+        whs = np.zeros((self.max_objects, 2), dtype=np.float32)
 
         for k in range(num_objects):
             cls_id, bbox, dim, location, ry, alpha = labels[k]
             bbox[[0, 2]] = bbox[[0, 2]] + pad_size[0]  # pad_x
             bbox[[1, 3]] = bbox[[1, 3]] + pad_size[1]  # pad_x
 
-            if hflipped:
-                bbox[[0, 2]] = input_w - bbox[[0, 2]] - 1
-                # Need to consider the ry, alpha values
-
-            h, w = bbox[3] - bbox[1], bbox[2] - bbox[0]
-            if h > 0 and w > 0:
-                bbox_area = w * h
-                # Compute sigma value based on bbox size
-                sigma = bbox_area * (max_sigma - min_sigma) / (Amax - Amin)
-
-                bbox = bbox / self.down_ratio  # on the heatmap
-                center = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
-                center_int = center.astype(np.int32)
-                if cls_id < 0:
-                    ignore_id = [_ for _ in range(num_classes)] if cls_id == - 1 else [- cls_id - 2]
-                    # Consider to make mask ignore
-                    continue
-
-                # Generate heatmaps for main center
-                gen_2d_gaussian_hm(hm_main_center[cls_id], center, sigma)  # dynamic sigma
-                # Index of the center
-                indices_center[k] = center_int[1] * hm_w + center_int[0]
+            bbox = bbox / self.down_ratio  # on the heatmap
+            bbox_h, bbox_w = bbox[3] - bbox[1], bbox[2] - bbox[0]
+            if bbox_h > 0 and bbox_w > 0:
+                sigma = 1.  # Just dummy
+                radius = 1  # Just dummy
+                if self.dynamic_sigma:
+                    # Settings for computing dynamic sigma
+                    max_sigma = 19
+                    min_sigma = 3
+                    Amax = 129682 / self.down_ratio
+                    Amin = 13 / self.down_ratio
+                    # Compute sigma value based on bbox size
+                    bbox_area = bbox_w * bbox_h
+                    sigma = bbox_area * (max_sigma - min_sigma) / (Amax - Amin)
+                else:
+                    radius = compute_radius((math.ceil(bbox_h), math.ceil(bbox_w)))
+                    radius = max(0, int(radius))
 
                 # Generate heatmaps for 8 vertexes
                 vertexes_3d = compute_box_3d(dim, location, ry)
-                vertexes_2d = project_to_image(vertexes_3d, calib.P)
-                vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
-
-                if hflipped:
-                    vertexes_2d[:, 0] = input_w - vertexes_2d[:, 0] - 1
-                    # Need to swap vertexes' index
+                if use_left_cam:
+                    vertexes_2d = project_to_image(vertexes_3d, calib.P2)
+                    vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
+                else:
+                    center_3d = np.mean(vertexes_3d, axis=0, keepdims=True)
+                    vertexes_2d = project_to_image(vertexes_3d, calib.P3)
+                    vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
+                    # TODO: Carefully check the translation's center of 2D box
+                    translate_center = project_to_image(center_3d, calib.P3) - project_to_image(center_3d, calib.P2)
+                    translate_center = translate_center.squeeze()
+                    bbox[[0, 2]] += translate_center[0] / self.down_ratio
+                    bbox[[1, 3]] += translate_center[1] / self.down_ratio
 
                 vertexes_2d = vertexes_2d / self.down_ratio  # on the heatmap
+                if hflipped:
+                    # Don't need to consider the ry, alpha values
+                    bbox[[0, 2]] = hm_w - bbox[[0, 2]] - 1
+                    vertexes_2d[:, 0] = hm_w - vertexes_2d[:, 0] - 1
+                    # Need to swap vertexes' index
+                    for e in self.hflip_indices:
+                        vertexes_2d[e[0]], vertexes_2d[e[1]] = vertexes_2d[e[1]].copy(), vertexes_2d[e[0]].copy()
+
+                center = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+                center_int = center.astype(np.int32)
+                if cls_id < 0:
+                    ignore_ids = [_ for _ in range(self.num_classes)] if cls_id == - 1 else [- cls_id - 2]
+                    # Consider to make mask ignore
+                    for cls_ig in ignore_ids:
+                        if self.dynamic_sigma:
+                            gen_hm_dynamic_sigma(hm_main_center[cls_ig], center, sigma)
+                        else:
+                            gen_hm_radius(hm_main_center[cls_ig], center_int, radius)
+                    hm_main_center[ignore_ids, center_int[1], center_int[0]] = 0.9999
+                    continue
+
+                # Generate heatmaps for main center
+                if self.dynamic_sigma:
+                    gen_hm_dynamic_sigma(hm_main_center[cls_id], center, sigma)  # dynamic sigma
+                else:
+                    gen_hm_radius(hm_main_center[cls_id], center, radius)
+                # Index of the center
+                indices_center[k] = center_int[1] * hm_w + center_int[0]
+
                 for ver_idx, ver in enumerate(vertexes_2d):
                     ver_int = ver.astype(np.int32)
                     if (0 <= ver_int[0] < hm_w) and (0 <= ver_int[1] < hm_h):
-                        gen_2d_gaussian_hm(hm_ver[ver_idx], ver, sigma)
+                        if self.dynamic_sigma:
+                            gen_hm_dynamic_sigma(hm_ver[ver_idx], ver, sigma)
+                        else:
+                            gen_hm_radius(hm_ver[ver_idx], ver, radius)
                         # targets for vertexes coordinates
-                        ver_coor[k, ver_idx * 2: (ver_idx + 1) * 2] = ver - center
+                        ver_coor[k, ver_idx * 2: (ver_idx + 1) * 2] = np.abs(ver - center)  # Take the absolute values
                         ver_coor_mask[k, ver_idx * 2: (ver_idx + 1) * 2] = 1
                         # targets for vertexes offset
-                        ver_offset[k * num_vertexes + ver_idx] = ver - ver_int
-                        ver_offset_mask[k * num_vertexes + ver_idx] = 1
+                        ver_offset[k * self.num_vertexes + ver_idx] = ver - ver_int
+                        ver_offset_mask[k * self.num_vertexes + ver_idx] = 1
                         # Indices of vertexes
-                        indices_vertexes[k * num_vertexes + ver_idx] = ver_int[1] * hm_w + ver_int[0]
+                        indices_vertexes[k * self.num_vertexes + ver_idx] = ver_int[1] * hm_w + ver_int[0]
 
                 # targets for center offset
                 cen_offset[k] = center - center_int
 
                 # targets for dimension
-                # Normalize dimension
-                norm_dim = self.normalize_dim(dim)
-                # TODO: What happend if the norm_dim < 0, we can't apply the log operator
-                # dimension[k] = np.log(norm_dim)  # take the log of the normalized dimension
-                dimension[k] = norm_dim
+                dimension[k] = dim
 
                 # targets for orientation
                 if alpha < np.pi / 6. or alpha > 5 * np.pi / 6.:
@@ -254,6 +307,8 @@ class KittiDataset(Dataset):
                 depth[k] = location[2]
 
                 # targets for 2d bbox
+                whs[k, 0] = bbox_w
+                whs[k, 1] = bbox_h
 
                 # Generate masks
                 obj_mask[k] = 1
@@ -264,7 +319,7 @@ class KittiDataset(Dataset):
             'ver_coor': ver_coor,
             'cen_offset': cen_offset,
             'ver_offset': ver_offset,
-            'dimension': dimension,
+            'dim': dimension,
             'rotbin': rotbin,
             'rotres': rotres,
             'depth': depth,
@@ -272,20 +327,33 @@ class KittiDataset(Dataset):
             'indices_vertexes': indices_vertexes,
             'obj_mask': obj_mask,
             'ver_coor_mask': ver_coor_mask,
-            'ver_offset_mask': ver_offset_mask
+            'ver_offset_mask': ver_offset_mask,
+            'wh': whs
         }
 
         return targets
 
     def draw_img_with_label(self, index):
+        use_left_cam = False
+        if np.random.random() < self.use_left_cam_prob:
+            use_left_cam = True
+
+        input_h, input_w = self.input_size
         sample_id = int(self.sample_id_list[index])
-        img_path = os.path.join(self.image_dir, '{:06d}.png'.format(sample_id))
-        img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+        img_path, img = self.get_image(sample_id, use_left_cam)
+        # Apply the augmentation for the raw image
+        if self.aug_transforms:
+            img = self.aug_transforms(image=img)['image']
+
         img, pad_size = self.padding_img(img, input_size=self.input_size)
+        hflipped = False
+        if np.random.random() < self.hflip_prob:
+            hflipped = True
+            img = (img[:, ::-1, :]).astype(np.uint8)
 
         calib = self.get_calib(sample_id)
         labels = self.get_label(sample_id)
-        for label in labels:
+        for label_idx, label in enumerate(labels):
             cat_id, bbox, dim, location, ry, alpha = label
             if cat_id < 0:
                 continue
@@ -293,15 +361,40 @@ class KittiDataset(Dataset):
             bbox[[0, 2]] = bbox[[0, 2]] + pad_size[0]  # pad_x
             bbox[[1, 3]] = bbox[[1, 3]] + pad_size[1]  # pad_x
 
-            center = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
-            center_int = center.astype(np.int32)
-            cv2.circle(img, (center_int[0], center_int[1]), 5, (255, 0, 0), -1)  # draw the center box
+            if hflipped:
+                bbox[[0, 2]] = input_w - bbox[[0, 2]] - 1
 
             vertexes_3d = compute_box_3d(dim, location, ry)
-            vertexes_2d = project_to_image(vertexes_3d, calib.P)
-            vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
+            if use_left_cam:
+                vertexes_2d = project_to_image(vertexes_3d, calib.P2)
+                vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
+            else:
+                center_3d = np.mean(vertexes_3d, axis=0, keepdims=True)
+                vertexes_2d = project_to_image(vertexes_3d, calib.P3)
+                vertexes_2d += pad_size.reshape(-1, 2)  # pad_x, pad_y
+                translate_center = project_to_image(center_3d, calib.P3) - project_to_image(center_3d, calib.P2)
+                translate_center = translate_center.squeeze()
+                bbox[[0, 2]] += translate_center[0]
+                bbox[[1, 3]] += translate_center[1]
+                # TODO: Carefully check the translation's center
+
+            if hflipped:
+                vertexes_2d[:, 0] = input_w - vertexes_2d[:, 0] - 1
+                for e in self.hflip_indices:
+                    vertexes_2d[e[0]], vertexes_2d[e[1]] = vertexes_2d[e[1]].copy(), vertexes_2d[e[0]].copy()
+
+            center = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+            center_int = center.astype(np.int32)
+            cv2.circle(img, (center_int[0], center_int[1]), 5, (0, 255, 0), -1)  # draw the center box
+
             img = cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 255, 255), 2)
             img = draw_box_3d(img, vertexes_2d, color=cnf.colors[cat_id])
+            # Put text that indicate the object index
+            img = cv2.putText(img, 'obj {}'.format(label_idx), tuple(center_int), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                              (0, 255, 0), 2, cv2.LINE_AA)
+            # for cn_idx, cn in enumerate(vertexes_2d):
+            #     img = cv2.putText(img, '{}'.format(cn_idx), tuple(cn), cv2.FONT_HERSHEY_SIMPLEX, 1,
+            #                       (0, 255, 0), 2, cv2.LINE_AA)
             # img = draw_box_3d_v2(img, conners_2d, color=cnf.colors[cat_id])
 
         return img.astype(np.uint8)
@@ -309,13 +402,29 @@ class KittiDataset(Dataset):
 
 if __name__ == '__main__':
     from easydict import EasyDict as edict
+    import albumentations as album
 
     configs = edict()
     configs.distributed = False  # For testing
     configs.pin_memory = False
     configs.num_samples = None
+    configs.input_size = (384, 1280)
+    configs.hm_size = (96, 320)
+    configs.down_ratio = 4
+    configs.max_objects = 50
+    configs.num_classes = 3
+    configs.num_vertexes = 8
+    configs.dynamic_sigma = False
+
     configs.dataset_dir = os.path.join('../../', 'dataset', 'kitti')
-    dataset = KittiDataset(configs.dataset_dir, mode='val', aug_transforms=None, num_samples=configs.num_samples)
+
+    aug_transforms = album.Compose([
+        album.RandomBrightnessContrast(p=0.5),
+        album.GaussNoise(p=0.5)
+    ], p=1.)
+
+    dataset = KittiDataset(configs, mode='val', aug_transforms=aug_transforms, num_samples=configs.num_samples,
+                           hflip_prob=0., use_left_cam_prob=1.)
 
     print('\n\nPress n to see the next sample >>> Press Esc to quit...')
     for idx in range(len(dataset)):

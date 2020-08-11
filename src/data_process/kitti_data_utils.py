@@ -132,8 +132,10 @@ class Calibration(object):
     def __init__(self, calib_filepath):
         calibs = self.read_calib_file(calib_filepath)
         # Projection matrix from rect camera coord to image2 coord
-        self.P = calibs['P2']
-        self.P = np.reshape(self.P, [3, 4])
+        self.P2 = calibs['P2']
+        self.P2 = np.reshape(self.P2, [3, 4])
+        self.P3 = calibs['P3']
+        self.P3 = np.reshape(self.P3, [3, 4])
         # Rigid transform from Velodyne coord to reference camera coord
         self.V2C = calibs['Tr_velo2cam']
         self.V2C = np.reshape(self.V2C, [3, 4])
@@ -142,12 +144,12 @@ class Calibration(object):
         self.R0 = np.reshape(self.R0, [3, 3])
 
         # Camera intrinsics and extrinsics
-        self.c_u = self.P[0, 2]
-        self.c_v = self.P[1, 2]
-        self.f_u = self.P[0, 0]
-        self.f_v = self.P[1, 1]
-        self.b_x = self.P[0, 3] / (-self.f_u)  # relative
-        self.b_y = self.P[1, 3] / (-self.f_v)
+        self.c_u = self.P2[0, 2]
+        self.c_v = self.P2[1, 2]
+        self.f_u = self.P2[0, 0]
+        self.f_v = self.P2[1, 1]
+        self.b_x = self.P2[0, 3] / (-self.f_u)  # relative
+        self.b_y = self.P2[1, 3] / (-self.f_v)
 
     def read_calib_file(self, filepath):
         with open(filepath) as f:
@@ -272,7 +274,7 @@ def draw_box_3d(image, corners, color=(0, 0, 255)):
     return image
 
 
-def gen_2d_gaussian_hm(heatmap, center, sigma):
+def gen_hm_dynamic_sigma(heatmap, center, sigma):
     tmp_size = sigma * 3
     mu_x = int(center[0] + 0.5)
     mu_y = int(center[1] + 0.5)
@@ -296,9 +298,69 @@ def gen_2d_gaussian_hm(heatmap, center, sigma):
     return heatmap
 
 
+def compute_radius(det_size, min_overlap=0.7):
+    height, width = det_size
+
+    a1 = 1
+    b1 = (height + width)
+    c1 = width * height * (1 - min_overlap) / (1 + min_overlap)
+    sq1 = np.sqrt(b1 ** 2 - 4 * a1 * c1)
+    r1 = (b1 + sq1) / 2
+
+    a2 = 4
+    b2 = 2 * (height + width)
+    c2 = (1 - min_overlap) * width * height
+    sq2 = np.sqrt(b2 ** 2 - 4 * a2 * c2)
+    r2 = (b2 + sq2) / 2
+
+    a3 = 4 * min_overlap
+    b3 = -2 * min_overlap * (height + width)
+    c3 = (min_overlap - 1) * width * height
+    sq3 = np.sqrt(b3 ** 2 - 4 * a3 * c3)
+    r3 = (b3 + sq3) / 2
+
+    return min(r1, r2, r3)
+
+
+def gaussian2D(shape, sigma=1):
+    m, n = [(ss - 1.) / 2. for ss in shape]
+    y, x = np.ogrid[-m:m + 1, -n:n + 1]
+    h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
+    h[h < np.finfo(h.dtype).eps * h.max()] = 0
+
+    return h
+
+
+def gen_hm_radius(heatmap, center, radius, k=1):
+    diameter = 2 * radius + 1
+    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
+
+    x, y = int(center[0]), int(center[1])
+
+    height, width = heatmap.shape[0:2]
+
+    left, right = min(x, radius), min(width - x, radius + 1)
+    top, bottom = min(y, radius), min(height - y, radius + 1)
+
+    masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
+    masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right]
+    if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:  # TODO debug
+        np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)
+
+    return heatmap
+
+
 if __name__ == '__main__':
+    dynamic_sigma = False
     heatmap = np.zeros((96, 320))
-    gen_2d_gaussian_hm(heatmap, center=(200, 50), sigma=2)
+    if dynamic_sigma:
+        gen_hm_dynamic_sigma(heatmap, center=(200, 50), sigma=2)
+    else:
+        h, w = 40, 50
+        radius = compute_radius((h, w))
+        radius = max(0, int(radius))
+        print('h: {}, w: {}, radius: {}, sigma: {}'.format(h, w, radius, (2 * radius + 1) / 6.))
+        gen_hm_radius(heatmap, center=(200, 50), radius=radius)
     while True:
         cv2.imshow('heatmap', heatmap)
         if cv2.waitKey(0) & 0xff == 27:

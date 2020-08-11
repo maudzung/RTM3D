@@ -191,14 +191,14 @@ def train_one_epoch(train_dataloader, model, optimizer, lr_scheduler, epoch, con
     progress = ProgressMeter(len(train_dataloader), [batch_time, data_time, losses],
                              prefix="Train - Epoch: [{}/{}]".format(epoch, configs.num_epochs))
 
-    criterion = Compute_Loss()
+    criterion = Compute_Loss(device=configs.device)
     num_iters_per_epoch = len(train_dataloader)
     # switch to train mode
     model.train()
     start_time = time.time()
     for batch_idx, batch_data in enumerate(tqdm(train_dataloader)):
         data_time.update(time.time() - start_time)
-        _, imgs, targets = batch_data
+        _, imgs, targets, metadatas = batch_data
         global_step = num_iters_per_epoch * (epoch - 1) + batch_idx + 1
 
         batch_size = imgs.size(0)
@@ -246,12 +246,12 @@ def train_one_epoch(train_dataloader, model, optimizer, lr_scheduler, epoch, con
 
 def validate(val_dataloader, model, configs):
     losses = AverageMeter('Loss', ':.4e')
-    criterion = Compute_Loss()
+    criterion = Compute_Loss(device=configs.device)
     # switch to train mode
     model.eval()
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(tqdm(val_dataloader)):
-            _, imgs, targets = batch_data
+            _, imgs, targets, metadatas = batch_data
 
             batch_size = imgs.size(0)
             for k in targets.keys():

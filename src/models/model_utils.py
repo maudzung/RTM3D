@@ -14,7 +14,7 @@ import torch
 
 sys.path.append('../')
 
-import models.resnet as resnet
+from models import resnet, fpn_resnet
 
 
 def create_model(configs):
@@ -24,8 +24,10 @@ def create_model(configs):
         num_layers = int(arch_parts[-1])
     except:
         raise ValueError
-
-    if 'resnet' in configs.arch:
+    if 'fpn_resnet' in configs.arch:
+        print('using ResNet architecture with feature pyramid')
+        model = fpn_resnet.get_pose_net(num_layers=num_layers, heads=configs.heads, head_conv=configs.head_conv)
+    elif 'resnet' in configs.arch:
         print('using ResNet architecture')
         model = resnet.get_pose_net(num_layers=num_layers, heads=configs.heads, head_conv=configs.head_conv)
     else:
@@ -99,18 +101,21 @@ if __name__ == '__main__':
     configs.num_dimension = 3
     configs.num_rot = 8
     configs.num_depth = 1
+    configs.num_wh = 2
     configs.heads = {
         'hm_mc': configs.num_classes,
         'hm_ver': configs.num_vertexes,
-        'hm_vercoor': configs.num_vertexes * 2,
-        'hm_cenoff': configs.num_center_offset,
-        'hm_veroff': configs.num_vertexes_offset,
-        'hm_dim': configs.num_dimension,
-        'hm_rot': configs.num_rot,
-        'hm_depth': configs.num_depth,
+        'vercoor': configs.num_vertexes * 2,
+        'cenoff': configs.num_center_offset,
+        'veroff': configs.num_vertexes_offset,
+        'dim': configs.num_dimension,
+        'rot': configs.num_rot,
+        'depth': configs.num_depth,
+        'wh': configs.num_wh
     }
 
     configs.device = torch.device('cuda:1')
+    # configs.device = torch.device('cpu')
 
     model = create_model(configs).to(device=configs.device)
     sample_input = torch.randn((1, 3, 224, 224)).to(device=configs.device)
@@ -118,3 +123,5 @@ if __name__ == '__main__':
     output = model(sample_input)
     for hm_name, hm_out in output.items():
         print('hm_name: {}, hm_out size: {}'.format(hm_name, hm_out.size()))
+
+    print('number of parameters: {}'.format(get_num_parameters(model)))

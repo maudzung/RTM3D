@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 -----------------------------------------------------------------------------------
 # Author: Nguyen Mau Dung
-# DoC: 2020.07.31
+# DoC: 2020.08.10
 # email: nguyenmaudung93.kstn@gmail.com
 -----------------------------------------------------------------------------------
 # Description: This script for creating the dataloader for training/validation/test phase
@@ -12,6 +12,7 @@ import sys
 
 import torch
 from torch.utils.data import DataLoader
+import albumentations as album
 
 sys.path.append('../')
 
@@ -21,9 +22,13 @@ from data_process.kitti_dataset import KittiDataset
 def create_train_dataloader(configs):
     """Create dataloader for training"""
 
-    train_aug_transforms = None
-    train_dataset = KittiDataset(configs.dataset_dir, mode='train', aug_transforms=train_aug_transforms,
-                                 hflip_prob=configs.hflip_prob, num_samples=configs.num_samples)
+    train_aug_transforms = album.Compose([
+        album.RandomBrightnessContrast(p=0.5),
+        album.GaussNoise(p=0.5)
+    ], p=1.)
+    train_dataset = KittiDataset(configs, mode='train', aug_transforms=train_aug_transforms,
+                                 hflip_prob=configs.hflip_prob, use_left_cam_prob=configs.use_left_cam_prob,
+                                 num_samples=configs.num_samples)
     train_sampler = None
     if configs.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -36,7 +41,8 @@ def create_train_dataloader(configs):
 def create_val_dataloader(configs):
     """Create dataloader for validation"""
     val_sampler = None
-    val_dataset = KittiDataset(configs.dataset_dir, mode='val', aug_transforms=None, num_samples=configs.num_samples)
+    val_dataset = KittiDataset(configs, mode='val', aug_transforms=None, hflip_prob=0.,
+                               use_left_cam_prob=configs.use_left_cam_prob, num_samples=configs.num_samples)
     if configs.distributed:
         val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False)
     val_dataloader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False,
@@ -48,7 +54,8 @@ def create_val_dataloader(configs):
 def create_test_dataloader(configs):
     """Create dataloader for testing phase"""
 
-    test_dataset = KittiDataset(configs.dataset_dir, mode='test', aug_transforms=None, num_samples=configs.num_samples)
+    test_dataset = KittiDataset(configs, mode='test', aug_transforms=None, hflip_prob=0.,
+                                use_left_cam_prob=configs.use_left_cam_prob, num_samples=configs.num_samples)
     test_sampler = None
     if configs.distributed:
         test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)

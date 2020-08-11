@@ -40,10 +40,13 @@ def parse_train_configs():
     ####################################################################
     ##############     Dataloader and Running configs            #######
     ####################################################################
-    parser.add_argument('--img_size', type=int, default=608,
-                        help='the size of input image')
     parser.add_argument('--hflip_prob', type=float, default=0.,
                         help='The probability of horizontal flip')
+    parser.add_argument('--use_left_cam_prob', type=float, default=1.,
+                        help='The probability of using the left camera')
+    parser.add_argument('--dynamic-sigma', action='store_true',
+                        help='If true, compute sigma based on Amax, Amin then generate heamap'
+                             'If false, compute radius as CenterNet did')
     parser.add_argument('--no-val', action='store_true',
                         help='If true, dont evaluate the model on the val set')
     parser.add_argument('--num_samples', type=int, default=None,
@@ -114,6 +117,8 @@ def parse_train_configs():
                         help='only evaluate the model, not training')
     parser.add_argument('--resume_path', type=str, default=None, metavar='PATH',
                         help='the path of the resumed checkpoint')
+    parser.add_argument('--K', type=int, default=100,
+                        help='the number of top K')
 
     configs = edict(vars(parser.parse_args()))
 
@@ -124,6 +129,10 @@ def parse_train_configs():
     configs.ngpus_per_node = torch.cuda.device_count()
 
     configs.pin_memory = True
+    configs.input_size = (384, 1280)
+    configs.hm_size = (96, 320)
+    configs.down_ratio = 4
+    configs.max_objects = 50
 
     if configs.head_conv == -1:  # init default head_conv
         configs.head_conv = 256 if 'dla' in configs.arch else 64
@@ -135,15 +144,17 @@ def parse_train_configs():
     configs.num_dimension = 3
     configs.num_rot = 8
     configs.num_depth = 1
+    configs.num_wh = 2
     configs.heads = {
         'hm_mc': configs.num_classes,
         'hm_ver': configs.num_vertexes,
-        'hm_vercoor': configs.num_vertexes * 2,
-        'hm_cenoff': configs.num_center_offset,
-        'hm_veroff': configs.num_vertexes_offset,
-        'hm_dim': configs.num_dimension,
-        'hm_rot': configs.num_rot,
-        'hm_depth': configs.num_depth,
+        'vercoor': configs.num_vertexes * 2,
+        'cenoff': configs.num_center_offset,
+        'veroff': configs.num_vertexes_offset,
+        'dim': configs.num_dimension,
+        'rot': configs.num_rot,
+        'depth': configs.num_depth,
+        'wh': configs.num_wh
     }
 
     ####################################################################
