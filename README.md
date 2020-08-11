@@ -12,13 +12,21 @@ The PyTorch Implementation of the paper:
 - [x] Realtime 3D object detection based on a monocular RGB image
 - [x] Support [distributed data parallel training](https://github.com/pytorch/examples/tree/master/distributed/ddp)
 - [x] Tensorboard
+- [x] ResNet-based keypoint feature pyramid network(KFPN)
+- [ ] Release pre-trained models 
 
 
-## To do list
-- [ ] Implement the Keypoint FPN in the model
-- [ ] Implement part 3.2 (3D Bounding Box Estimation part), revise _**(formula (7))**_
-- [ ] Revise loss for depth estimation _**(formula (3))**_ (normalize depth maybe < 0 --> couldn't apply log operator)
-- [ ] Release pre-trained models
+
+## Some modifications from the paper
+- _**formula (3)**_:  
+   - A negative value can't be an input of the `log` operator, so please **don't normalize dim** as mentioned in
+the paper because the normalized dim values maybe less than `0`. Hence I've directly regressed to absolute dimension values in meters.
+   - Use `L1 loss` for depth estimation (applying the `sigmoid` activation to the depth output first).
+   
+- _**formula (7)**_: `argmin` instead of `argmax`
+
+- Generate heatmap for the center and vertexes of objects as the CenterNet paper. If you want to use the strategy from RTM3D paper,
+you can pass the `dynamic-sigma` argument to the `train.py` script.
 
 
 ## 2. Getting Started
@@ -35,7 +43,8 @@ The downloaded data includes:
 
 - Training labels of object data set _**(5 MB)**_
 - Camera calibration matrices of object data set _**(16 MB)**_
-- Left color images of object data set _**(12 GB)**_
+- **Left color images** of object data set _**(12 GB)**_
+- **Right color images** of object data set _**(12 GB)**_
 
 Please make sure that you construct the source code & dataset directories structure as below.
 
@@ -56,7 +65,7 @@ and `vertexes coordinate` as the base module to estimate `3D bounding box`.
 cd src/data_process
 ```
 
-- To visualize camera images (with 3D boxes), let's execute:
+- To visualize camera images with 3D boxes, let's execute:
 
 ```shell script
 python kitti_dataset.py
@@ -85,7 +94,7 @@ python evaluate.py --gpu_idx 0 --arch resnet_18 --pretrained_path <PATH>
 ##### 2.4.4.1. Single machine, single gpu
 
 ```shell script
-python train.py --gpu_idx 0 --batch_size <N> --num_workers <N>...
+python train.py --gpu_idx 0 --arch <ARCH> --batch_size <N> --num_workers <N>...
 ```
 
 ##### 2.4.4.2. Multi-processing Distributed Data Parallel Training
@@ -158,13 +167,13 @@ Thank you!
 
 [1] CenterNet: [Objects as Points paper](https://arxiv.org/abs/1904.07850), [PyTorch Implementation](https://github.com/xingyizhou/CenterNet)
 
-
 ## Folder structure
 
 ```
 ${ROOT}
 └── checkpoints/    
     ├── rtm3d_resnet_18.pth
+    ├── rtm3d_fpn_resnet_18.pth
 └── dataset/    
     └── kitti/
         ├──ImageSets/
@@ -172,11 +181,13 @@ ${ROOT}
         │   ├── train.txt
         │   └── val.txt
         ├── training/
-        │   ├── image_2/
+        │   ├── image_2/ (left color camera)
+        │   ├── image_3/ (right color camera)
         │   ├── calib/
         │   ├── label_2/
         └── testing/  
-        │   ├── image_2/
+        │   ├── image_2/ (left color camera)
+        │   ├── image_3/ (right color camera)
         │   ├── calib/
         └── classes_names.txt
 └── src/
@@ -186,9 +197,9 @@ ${ROOT}
     ├── data_process/
     │   ├── kitti_dataloader.py
     │   ├── kitti_dataset.py
-    │   ├── kitti_data_utils.py
-    │   └── transformation.py
+    │   └── kitti_data_utils.py
     ├── models/
+    │   ├── fpn_resnet.py
     │   ├── resnet.py
     │   ├── model_utils.py
     └── utils/
@@ -203,6 +214,88 @@ ${ROOT}
     └── train.sh
 ├── README.md 
 └── requirements.txt
+```
+
+
+## Usage
+
+```
+usage: train.py [-h] [--seed SEED] [--saved_fn FN] [--root-dir PATH]
+                [--arch ARCH] [--pretrained_path PATH] [--head_conv HEAD_CONV]
+                [--hflip_prob HFLIP_PROB]
+                [--use_left_cam_prob USE_LEFT_CAM_PROB] [--dynamic-sigma]
+                [--no-val] [--num_samples NUM_SAMPLES]
+                [--num_workers NUM_WORKERS] [--batch_size BATCH_SIZE]
+                [--print_freq N] [--tensorboard_freq N] [--checkpoint_freq N]
+                [--start_epoch N] [--num_epochs N] [--lr_type LR_TYPE]
+                [--lr LR] [--minimum_lr MIN_LR] [--momentum M] [-wd WD]
+                [--optimizer_type OPTIMIZER] [--steps [STEPS [STEPS ...]]]
+                [--world-size N] [--rank N] [--dist-url DIST_URL]
+                [--dist-backend DIST_BACKEND] [--gpu_idx GPU_IDX] [--no_cuda]
+                [--multiprocessing-distributed] [--evaluate]
+                [--resume_path PATH] [--K K]
+
+The Implementation of RTM3D using PyTorch
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --seed SEED           re-produce the results with seed random
+  --saved_fn FN         The name using for saving logs, models,...
+  --root-dir PATH       The ROOT working directory
+  --arch ARCH           The name of the model architecture
+  --pretrained_path PATH
+                        the path of the pretrained checkpoint
+  --head_conv HEAD_CONV
+                        conv layer channels for output head0 for no conv
+                        layer-1 for default setting: 64 for resnets and 256
+                        for dla.
+  --hflip_prob HFLIP_PROB
+                        The probability of horizontal flip
+  --use_left_cam_prob USE_LEFT_CAM_PROB
+                        The probability of using the left camera
+  --dynamic-sigma       If true, compute sigma based on Amax, Amin then
+                        generate heamapIf false, compute radius as CenterNet
+                        did
+  --no-val              If true, dont evaluate the model on the val set
+  --num_samples NUM_SAMPLES
+                        Take a subset of the dataset to run and debug
+  --num_workers NUM_WORKERS
+                        Number of threads for loading data
+  --batch_size BATCH_SIZE
+                        mini-batch size (default: 16), this is the totalbatch
+                        size of all GPUs on the current node when usingData
+                        Parallel or Distributed Data Parallel
+  --print_freq N        print frequency (default: 50)
+  --tensorboard_freq N  frequency of saving tensorboard (default: 50)
+  --checkpoint_freq N   frequency of saving checkpoints (default: 5)
+  --start_epoch N       the starting epoch
+  --num_epochs N        number of total epochs to run
+  --lr_type LR_TYPE     the type of learning rate scheduler (cosin or
+                        multi_step)
+  --lr LR               initial learning rate
+  --minimum_lr MIN_LR   minimum learning rate during training
+  --momentum M          momentum
+  -wd WD, --weight_decay WD
+                        weight decay (default: 1e-6)
+  --optimizer_type OPTIMIZER
+                        the type of optimizer, it can be sgd or adam
+  --steps [STEPS [STEPS ...]]
+                        number of burn in step
+  --world-size N        number of nodes for distributed training
+  --rank N              node rank for distributed training
+  --dist-url DIST_URL   url used to set up distributed training
+  --dist-backend DIST_BACKEND
+                        distributed backend
+  --gpu_idx GPU_IDX     GPU index to use.
+  --no_cuda             If true, cuda is not used.
+  --multiprocessing-distributed
+                        Use multi-processing distributed training to launch N
+                        processes per node, which has N GPUs. This is the
+                        fastest way to use PyTorch for either single node or
+                        multi node data parallel training
+  --evaluate            only evaluate the model, not training
+  --resume_path PATH    the path of the resumed checkpoint
+  --K K                 the number of top K
 ```
 
 
