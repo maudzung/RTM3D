@@ -157,7 +157,7 @@ if __name__ == '__main__':
                                       outputs['veroff'], outputs['wh'], outputs['rot'], outputs['depth'],
                                       outputs['dim'], K=configs.K)
             detections = detections.cpu().numpy()
-            detections = post_processing_2d(detections)
+            detections = post_processing_2d(detections, configs.num_classes, configs.down_ratio)
             detections = get_final_pred(detections[0], configs.num_classes, configs.peak_thresh)
 
             img = imgs.squeeze().permute(1, 2, 0).numpy()

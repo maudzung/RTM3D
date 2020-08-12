@@ -18,6 +18,7 @@ import torch.nn.functional as F
 import cv2
 
 sys.path.append('../')
+from data_process.kitti_data_utils import draw_box_3d
 
 
 def _nms(heat, kernel=3):
@@ -76,7 +77,8 @@ def _topk_channel(scores, K=40):
     return topk_scores, topk_inds, topk_ys, topk_xs
 
 
-def rtm3d_decode(hm_mc, hm_ver, ver_coor, cen_off, ver_off, wh, rot, depth, dim, K=40):
+def rtm3d_decode(hm_mc, hm_ver, ver_coor, cen_off, ver_off, wh, rot, depth, dim, K=40, hm_size=(96, 320)):
+    device = hm_mc.device
     batch_size, num_classes, height, width = hm_mc.size()
     num_vertexes = hm_ver.size(1)
 
@@ -99,7 +101,6 @@ def rtm3d_decode(hm_mc, hm_ver, ver_coor, cen_off, ver_off, wh, rot, depth, dim,
     dim = dim.view(batch_size, K, 3)
     clses = clses.view(batch_size, K, 1).float()
     scores = scores.view(batch_size, K, 1)
-
     wh = _transpose_and_gather_feat(wh, inds)
     wh = wh.view(batch_size, K, 2)
 
@@ -112,42 +113,44 @@ def rtm3d_decode(hm_mc, hm_ver, ver_coor, cen_off, ver_off, wh, rot, depth, dim,
     ver_coor = ver_coor.view(batch_size, K, num_vertexes * 2)
     ver_coor[..., ::2] += xs.view(batch_size, K, 1).expand(batch_size, K, num_vertexes)
     ver_coor[..., 1::2] += ys.view(batch_size, K, 1).expand(batch_size, K, num_vertexes)
-    ver_coor = ver_coor.view(batch_size, K, num_vertexes, 2).permute(0, 2, 1, 3).contiguous()  # b x J x K x 2
-    reg_kps = ver_coor.unsqueeze(3).expand(batch_size, num_vertexes, K, K, 2)
+    ver_coor = ver_coor.view(batch_size, K, num_vertexes, 2).permute(0, 2, 1, 3).contiguous()  # b x num_vers x K x 2
+    pure_ver_pos = ver_coor.unsqueeze(3).expand(batch_size, num_vertexes, K, K, 2)
 
     hm_ver = _nms(hm_ver)
     thresh = 0.1
-    hm_score, hm_inds, hm_ys, hm_xs = _topk_channel(hm_ver, K=K)  # b x J x K
+    ver_score, ver_inds, ver_ys, ver_xs = _topk_channel(hm_ver, K=K)  # b x num_vertexes x K
     if ver_off is not None:
-        ver_off = _transpose_and_gather_feat(ver_off, hm_inds.view(batch_size, -1))
+        ver_off = _transpose_and_gather_feat(ver_off, ver_inds.view(batch_size, -1))
         ver_off = ver_off.view(batch_size, num_vertexes, K, 2)
-        hm_xs = hm_xs + ver_off[:, :, :, 0]
-        hm_ys = hm_ys + ver_off[:, :, :, 1]
+        ver_xs = ver_xs + ver_off[:, :, :, 0]
+        ver_ys = ver_ys + ver_off[:, :, :, 1]
     else:
-        hm_xs = hm_xs + 0.5
-        hm_ys = hm_ys + 0.5
+        ver_xs = ver_xs + 0.5
+        ver_ys = ver_ys + 0.5
 
-    mask = (hm_score > thresh).float()
-    hm_score = (1 - mask) * -1 + mask * hm_score
-    hm_ys = (1 - mask) * (-10000) + mask * hm_ys
-    hm_xs = (1 - mask) * (-10000) + mask * hm_xs
-    hm_kps = torch.stack([hm_xs, hm_ys], dim=-1).unsqueeze(2).expand(batch_size, num_vertexes, K, K, 2)
-    dist = (((reg_kps - hm_kps) ** 2).sum(dim=4) ** 0.5)
-    min_dist, min_ind = dist.min(dim=3)  # b x J x K
-    hm_score = hm_score.gather(2, min_ind).unsqueeze(-1)  # b x J x K x 1
+    mask = (ver_score > thresh).float()
+    ver_score = (1 - mask) * -1 + mask * ver_score
+    ver_ys = (1 - mask) * (-10000) + mask * ver_ys
+    ver_xs = (1 - mask) * (-10000) + mask * ver_xs
+    ver_pos = torch.stack([ver_xs, ver_ys], dim=-1).unsqueeze(2).expand(batch_size, num_vertexes, K, K, 2)
+    # dist size: (batch_size, num_vertexes, K, K, 2) --> (batch_size, num_vertexes, K, K)
+    dist = (((pure_ver_pos - ver_pos) ** 2).sum(dim=4) ** 0.5)
+    min_dist, min_ind = dist.min(dim=3)  # b x num_vertexes x K
+    ver_score = ver_score.gather(2, min_ind).unsqueeze(-1)  # b x num_vertexes x K x 1
     min_dist = min_dist.unsqueeze(-1)
     min_ind = min_ind.view(batch_size, num_vertexes, K, 1, 1).expand(batch_size, num_vertexes, K, 1, 2)
-    hm_kps = hm_kps.gather(3, min_ind)
-    hm_kps = hm_kps.view(batch_size, num_vertexes, K, 2)
-    l = bboxes[:, :, 0].view(batch_size, 1, K, 1).expand(batch_size, num_vertexes, K, 1)
-    t = bboxes[:, :, 1].view(batch_size, 1, K, 1).expand(batch_size, num_vertexes, K, 1)
-    r = bboxes[:, :, 2].view(batch_size, 1, K, 1).expand(batch_size, num_vertexes, K, 1)
-    b = bboxes[:, :, 3].view(batch_size, 1, K, 1).expand(batch_size, num_vertexes, K, 1)
-    mask = (hm_kps[..., 0:1] < l) + (hm_kps[..., 0:1] > r) + \
-           (hm_kps[..., 1:2] < t) + (hm_kps[..., 1:2] > b) + \
-           (hm_score < thresh) + (min_dist > (torch.max(b - t, r - l) * 0.3))
+    ver_pos = ver_pos.gather(3, min_ind)
+    ver_pos = ver_pos.view(batch_size, num_vertexes, K, 2)
+
+    hm_h, hm_w = hm_size
+    dummy_h = torch.ones(size=(batch_size, num_vertexes, K, 1), device=device, dtype=torch.float) * hm_h
+    dummy_w = torch.ones(size=(batch_size, num_vertexes, K, 1), device=device, dtype=torch.float) * hm_w
+
+    mask = (ver_pos[..., 0:1] < 0) + (ver_pos[..., 0:1] > hm_w) + \
+           (ver_pos[..., 1:2] < 0) + (ver_pos[..., 1:2] > hm_h) + \
+           (ver_score < thresh) + (min_dist > (torch.max(dummy_h, dummy_w) * 0.3))
     mask = (mask > 0).float().expand(batch_size, num_vertexes, K, 2)
-    ver_coor = (1 - mask) * hm_kps + mask * ver_coor
+    ver_coor = (1 - mask) * ver_pos + mask * ver_coor
     ver_coor = ver_coor.permute(0, 2, 1, 3).contiguous().view(batch_size, K, num_vertexes * 2)
 
     # (scores x 1, xs x 1, ys x 1, wh x 2, bboxes x 4, ver_coor x 16, rot x 8, depth x 1, dim x 3, clses x 1)
@@ -172,7 +175,7 @@ def get_pred_depth(depth):
     return depth
 
 
-def post_processing_2d(detections):
+def post_processing_2d(detections, num_classes=3, down_ratio=4):
     """
 
     :param detections: [batch_size, K, 38]
@@ -182,8 +185,7 @@ def post_processing_2d(detections):
     :return:
     """
     # TODO: Need to consider rescale to the original scale: bbox, xs, ys, and ver_coor - 1:25
-    num_classes = 3
-    down_ratio = 4
+
     ret = []
     for i in range(detections.shape[0]):
         top_preds = {}
@@ -210,16 +212,20 @@ def get_final_pred(detections, num_classes=3, peak_thresh=0.2):
     return detections
 
 
-def draw_predictions(img, detections, colors, num_classes=3):
+def draw_predictions(img, detections, colors, num_classes=3, show_3dbox=False):
     for j in range(num_classes):
         if len(detections[j] > 0):
             for det in detections[j]:
                 # (scores-0:1, xs-1:2, ys-2:3, wh-3:5, bboxes-5:9, ver_coor-9:25, rot-25:26, depth-26:27, dim-27:30)
                 _score = det[0]
-                _x, _y, _wh, _bbox, _ver_coor = det[1], det[2], det[3:5], det[5:9], det[9:25]
+                _x, _y, _wh, _bbox, _ver_coor = int(det[1]), int(det[2]), det[3:5], det[5:9], det[9:25]
                 _rot, _depth, _dim = det[25], det[26], det[27:30]
                 _bbox = np.array(_bbox, dtype=np.int)
-                img = cv2.rectangle(img, (_bbox[0], _bbox[1]), (_bbox[2], _bbox[3]), colors[j], 2)
+                img = cv2.rectangle(img, (_bbox[0], _bbox[1]), (_bbox[2], _bbox[3]), colors[-j - 1], 2)
+                if show_3dbox:
+                    _ver_coor = np.array(_ver_coor, dtype=np.int).reshape(-1, 2)
+                    img = draw_box_3d(img, _ver_coor, color=colors[j])
+                # print('_depth: {:.2f}n, _dim: {}, _rot: {:.2f} radian'.format(_depth, _dim, _rot))
 
     return img
 
