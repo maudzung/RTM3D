@@ -281,7 +281,7 @@ class KittiDataset(Dataset):
                         else:
                             gen_hm_radius(hm_ver[ver_idx], ver, radius)
                         # targets for vertexes coordinates
-                        ver_coor[k, ver_idx * 2: (ver_idx + 1) * 2] = np.abs(ver - center)  # Take the absolute values
+                        ver_coor[k, ver_idx * 2: (ver_idx + 1) * 2] = ver - center  # Don't take the absolute values
                         ver_coor_mask[k, ver_idx * 2: (ver_idx + 1) * 2] = 1
                         # targets for vertexes offset
                         ver_offset[k * self.num_vertexes + ver_idx] = ver - ver_int
