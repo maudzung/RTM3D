@@ -27,7 +27,10 @@ The PyTorch Implementation of the paper:
    - A negative value can't be an input of the `log` operator, so please **don't normalize dim** as mentioned in
 the paper because the normalized dim values maybe less than `0`. Hence I've directly regressed to absolute dimension values in meters.
    - Use `L1 loss` for depth estimation (applying the `sigmoid` activation to the depth output first).
-   
+
+- _**Formula (5)**_: I haven't taken the absolute values of the ground-truth, 
+I have used the **relative values** instead. [The code is here](https://github.com/maudzung/RTM3D/blob/45b9d8af1298a6ad7dacb99a8f538f285696ded4/src/data_process/kitti_dataset.py#L284)
+
 - _**Formula (7)**_: `argmin` instead of `argmax`
 
 - Generate heatmap for the center and vertexes of objects as the CenterNet paper. If you want to use the strategy from RTM3D paper,
