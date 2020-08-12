@@ -8,22 +8,27 @@ The PyTorch Implementation of the paper:
 
 ---
 
+## Demonstration
+
+![demo](./docs/demo.gif)
+
 ## Features
 - [x] Realtime 3D object detection based on a monocular RGB image
 - [x] Support [distributed data parallel training](https://github.com/pytorch/examples/tree/master/distributed/ddp)
 - [x] Tensorboard
-- [x] ResNet-based keypoint feature pyramid network(KFPN)
+- [x] ResNet-based **K**eypoint **F**eature **P**yramid **N**etwork (KFPN) (Using by setting `--arch fpn_resnet_18`)
+- [ ] Use images from both left and right cameras (Control by setting the `use_left_cam_prob` argument)
 - [ ] Release pre-trained models 
 
 
 
 ## Some modifications from the paper
-- _**formula (3)**_:  
+- _**Formula (3)**_:  
    - A negative value can't be an input of the `log` operator, so please **don't normalize dim** as mentioned in
 the paper because the normalized dim values maybe less than `0`. Hence I've directly regressed to absolute dimension values in meters.
    - Use `L1 loss` for depth estimation (applying the `sigmoid` activation to the depth output first).
    
-- _**formula (7)**_: `argmin` instead of `argmax`
+- _**Formula (7)**_: `argmin` instead of `argmax`
 
 - Generate heatmap for the center and vertexes of objects as the CenterNet paper. If you want to use the strategy from RTM3D paper,
 you can pass the `dynamic-sigma` argument to the `train.py` script.
@@ -76,7 +81,7 @@ Then _Press **n** to see the next sample >>> Press **Esc** to quit..._
 
 #### 2.4.2. Inference
 
-Download the trained model from [**_here_**](https://drive.google.com/drive/folders/1lKOLHhWZasoC7cKNLcB714LBDS91whCr?usp=sharing), 
+Download the trained model from [**_here_**](https://drive.google.com/drive/folders/1lKOLHhWZasoC7cKNLcB714LBDS91whCr?usp=sharing) (will be released),
 then put it to `${ROOT}/checkpoints/` and execute:
 
 ```shell script
