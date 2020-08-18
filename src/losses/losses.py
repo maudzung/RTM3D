@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 sys.path.append('../')
 
-from utils.torch_utils import to_cpu
+from utils.torch_utils import to_cpu, _sigmoid
 
 
 def _gather_feat(feat, ind, mask=None):
@@ -184,8 +184,8 @@ class Compute_Loss(nn.Module):
 
     def forward(self, outputs, tg):
         # tg: targets
-        outputs['hm_mc'] = F.sigmoid(outputs['hm_mc'])
-        outputs['hm_ver'] = F.sigmoid(outputs['hm_ver'])
+        outputs['hm_mc'] = _sigmoid(outputs['hm_mc'])
+        outputs['hm_ver'] = _sigmoid(outputs['hm_ver'])
 
         # Normalize dimension
         # TODO: What happend if the norm_dim < 0, we can't apply the log operator
@@ -193,7 +193,7 @@ class Compute_Loss(nn.Module):
         # tg['dim'] = F.log(tg['dim'])  # take the log of the normalized dimension
 
         # Follow depth loss in CenterNet
-        outputs['depth'] = 1. / (F.sigmoid(outputs['depth']) + 1e-9) - 1.
+        outputs['depth'] = 1. / (_sigmoid(outputs['depth']) + 1e-9) - 1.
 
         l_hm_mc = self.focal_loss(outputs['hm_mc'], tg['hm_mc'])
         l_hm_ver = self.focal_loss(outputs['hm_ver'], tg['hm_ver'])

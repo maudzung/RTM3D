@@ -20,7 +20,6 @@ from easydict import EasyDict as edict
 import cv2
 import torch
 import numpy as np
-import torch.nn.functional as F
 
 sys.path.append('../')
 
@@ -29,6 +28,7 @@ from data_process.kitti_dataloader import create_test_dataloader
 from models.model_utils import create_model
 from utils.misc import make_folder, time_synchronized
 from utils.evaluation_utils import rtm3d_decode, post_processing_2d, get_final_pred, draw_predictions
+from utils.torch_utils import _sigmoid
 
 
 def parse_test_configs():
@@ -149,9 +149,9 @@ if __name__ == '__main__':
             t1 = time_synchronized()
             outputs = model(input_imgs)
             t2 = time_synchronized()
-            outputs['hm_mc'] = F.sigmoid(outputs['hm_mc'])
-            outputs['hm_ver'] = F.sigmoid(outputs['hm_ver'])
-            outputs['depth'] = 1. / (F.sigmoid(outputs['depth']) + 1e-9) - 1.
+            outputs['hm_mc'] = _sigmoid(outputs['hm_mc'])
+            outputs['hm_ver'] = _sigmoid(outputs['hm_ver'])
+            outputs['depth'] = 1. / (_sigmoid(outputs['depth']) + 1e-9) - 1.
             # detections size (batch_size, K, 38)
             detections = rtm3d_decode(outputs['hm_mc'], outputs['hm_ver'], outputs['vercoor'], outputs['cenoff'],
                                       outputs['veroff'], outputs['wh'], outputs['rot'], outputs['depth'],

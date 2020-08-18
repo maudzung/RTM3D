@@ -12,7 +12,7 @@
 import torch
 import torch.distributed as dist
 
-__all__ = ['convert2cpu', 'convert2cpu_long', 'to_cpu', 'reduce_tensor', 'to_python_float']
+__all__ = ['convert2cpu', 'convert2cpu_long', 'to_cpu', 'reduce_tensor', 'to_python_float', '_sigmoid']
 
 
 def convert2cpu(gpu_matrix):
@@ -39,3 +39,7 @@ def to_python_float(t):
         return t.item()
     else:
         return t[0]
+
+
+def _sigmoid(x):
+    return torch.clamp(x.sigmoid_(), min=1e-4, max=1 - 1e-4)
